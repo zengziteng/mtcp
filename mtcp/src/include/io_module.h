@@ -69,6 +69,9 @@ typedef struct io_module_func {
 	int32_t	  (*select)(struct mtcp_thread_context *ctx);
 	void	  (*destroy_handle)(struct mtcp_thread_context *ctx);
 	int32_t	  (*dev_ioctl)(struct mtcp_thread_context *ctx, int nif, int cmd, void *argp);
+	#ifndef DISABLE_AFXDP
+	void	  (*release_rx_ring)(struct mtcp_thread_context *ctxt, int recv_cnt);
+	#endif
 } io_module_func __attribute__((aligned(__WORDSIZE)));
 /*----------------------------------------------------------------------------*/
 /* set I/O module context */
@@ -106,6 +109,9 @@ extern io_module_func netmap_module_func;
 /* registered onvm context */
 extern io_module_func onvm_module_func;
 
+/* registered afxdp context */
+extern io_module_func afxdp_module_func;
+
 /* check I/O module access permissions */
 int
 CheckIOModuleAccessPermissions();
@@ -116,10 +122,10 @@ CheckIOModuleAccessPermissions();
 			current_iomodule_func = &ps_module_func;	\
 		else if (!strcmp(m, "dpdk"))				\
 			current_iomodule_func = &dpdk_module_func;	\
-		else if (!strcmp(m, "netmap"))				\
-			current_iomodule_func = &netmap_module_func;	\
  		else if (!strcmp(m, "onvm"))				\
   			current_iomodule_func = &onvm_module_func;	\
+		else if (!strcmp(m, "afxdp"))				\
+  			current_iomodule_func = &afxdp_module_func;	\
 		else							\
 			assert(0);					\
 	}

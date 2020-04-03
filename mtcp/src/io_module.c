@@ -462,8 +462,14 @@ SetNetEnv(char *dev_name_list, char *port_stat_list)
 			1 : 0;
 		
 #endif /* !DISABLE_DPDK */
-	} else if (current_iomodule_func == &netmap_module_func) {
 #ifndef DISABLE_NETMAP
+	} else if (current_iomodule_func == &netmap_module_func) 
+#endif
+#ifndef DISABLE_AFXDP
+	}  else if (current_iomodule_func == &afxdp_module_func)
+#endif
+	{
+#ifndef DISABLE_AFXDP //m-> come back here to handle NETMAP as well
 		struct ifaddrs *ifap;
 		struct ifaddrs *iter_if;
 		char *seek;
@@ -726,6 +732,7 @@ FetchEndianType()
 int
 CheckIOModuleAccessPermissions()
 {
+#ifndef DISABLE_NETMAP
 	int fd;
 	/* check if netmap module can access I/O with sudo privileges */
 	if (current_iomodule_func == &netmap_module_func) {
@@ -734,6 +741,7 @@ CheckIOModuleAccessPermissions()
 			close(fd);
 		return fd;
 	}
+#endif //DISABLE_NETMAP
 
 	/* sudo privileges are definitely needed otherwise */
 	if (geteuid())
