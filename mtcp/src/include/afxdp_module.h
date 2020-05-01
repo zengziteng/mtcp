@@ -1,15 +1,17 @@
 //#include "../common/common_params.h"
 //#include "../common/common_user_bpf_xdp.h"
-#include "/home/vagrant/mtcp/afxdp/common/common_params.h"
-#include "/home/vagrant/mtcp/afxdp/common/common_user_bpf_xdp.h"
+#include "../../../afxdp/common/common_params.h"
+#include "../../../afxdp/common/common_user_bpf_xdp.h"
 #include <errno.h>
-#define MAX_PKT_BURST 64
+#define MAX_PKT_BURST 1024
+//#define MAX_PKT_BURST 64
 //#include "../common/common_libbpf.h"
 
-
-#define NUM_FRAMES         4096
+#define NUM_FRAMES         8192
+//#define NUM_FRAMES         4096
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
-#define RX_BATCH_SIZE      64
+//#define RX_BATCH_SIZE      512
+#define RX_BATCH_SIZE     128
 #define INVALID_UMEM_FRAME UINT64_MAX
 
 

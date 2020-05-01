@@ -72,6 +72,7 @@ struct afxdp_private_context { //private context on mTCP
 	int processed_pkts;
 	struct snd_list_info *snd_list;
 	struct config cfg;
+	struct pollfd fds[2];
 }__attribute__((aligned(__WORDSIZE)));
 
 
@@ -121,6 +122,9 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 	char ifname[MAX_IFNAMELEN];
 	char nifname[MAX_IFNAMELEN];
 	int j;
+//	char ethtool_command[50];
+//        sprintf(ethtool_command, "ethtool -L %s combined %i", ifname, CONFIG.num_cores);
+
 
 	/* create and initialize private I/O module context */
 	ctxt->io_private_context = calloc(1, sizeof(struct afxdp_private_context));
@@ -144,30 +148,49 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 				    ifname, devices_attached[j], strerror(errno));
 			exit(EXIT_FAILURE);
 		}
-
+		
 		axpc->bpf_obj = NULL;
-		printf("Configuring AF_XDP context...\n");
 		axpc->cfg.ifindex = devices_attached[j]; //(enp0s8) m-> 3 if not getting correctly from mTCP
 		axpc->cfg.do_unload = 0;
-		sprintf(axpc->cfg.filename, "af_xdp_kern.o");
+		sprintf(axpc->cfg.filename, "../../afxdp/afxdp_kern.o");
 		sprintf(axpc->cfg.progsec, "xdp_sock");
 		axpc->cfg.ifname = malloc(MAX_IFNAMELEN);
 		axpc->cfg.ifname = ifname;
-		//m-> load xdp ebpf program in the Kernel
-		axpc->bpf_obj = load_bpf_and_xdp_attach(&axpc->cfg);
-		if (!axpc->bpf_obj) {
-			/* Error handling done in load_bpf_and_xdp_attach() */
-			exit(EXIT_FAILURE);
-		}
+		axpc->cfg.xsk_if_queue = ctxt->cpu;  //m-> set the receiving queue to the processing core number 
 
-		/* We also need to load the xsks_map */
-		axpc->map = bpf_object__find_map_by_name(axpc->bpf_obj, "xsks_map");
-		//m-> Place xsk (xdp socket) in the xdp/ebpf map
-		axpc->xsks_map_fd = bpf_map__fd(axpc->map);
-		if (axpc->xsks_map_fd < 0) {
-			fprintf(stderr, "ERROR: no xsks map found: %s\n",
-				strerror(axpc->xsks_map_fd));
-			exit(EXIT_FAILURE);
+		//m-> enable poll mode
+		axpc->cfg.xsk_poll_mode = 1;
+	
+		char ethtool_command[50];
+		sprintf(ethtool_command, "ethtool -L %s combined %i 2> /dev/null", ifname, CONFIG.num_cores);
+		system(ethtool_command);
+		bzero(ethtool_command, sizeof(ethtool_command));
+		//sprintf(ethtool_command, "ethtool -N ens1f1 rx-flow-hash tcp4 sdfn");
+		//system(ethtool_command);
+		//m-> load xdp ebpf program in the Kernel
+		if (ctxt->cpu != 0) //m-> change this to a pthread barrier
+			sleep(2);
+		if (ctxt->cpu == 0){
+			printf("Initing XDP...\n");
+		//	char ethtool_command[50];
+		//      	sprintf(ethtool_command, "ethtool -L %s combined %i", ifname, CONFIG.num_cores);
+			//printf("ifname: %s\n", ifname);
+			axpc->bpf_obj = load_bpf_and_xdp_attach(&axpc->cfg);
+			if (!axpc->bpf_obj) {
+				/* Error handling done in load_bpf_and_xdp_attach() */
+				exit(EXIT_FAILURE);
+			}
+		
+			/* We also need to load the xsks_map */
+			axpc->map = bpf_object__find_map_by_name(axpc->bpf_obj, "xsks_map");
+			//m-> Place xsk (xdp socket) in the xdp/ebpf map
+			axpc->xsks_map_fd = bpf_map__fd(axpc->map);
+			if (axpc->xsks_map_fd < 0) {
+				fprintf(stderr, "ERROR: no xsks map found: %s\n",
+					strerror(axpc->xsks_map_fd));
+				exit(EXIT_FAILURE);
+			}
+	
 		}
 
 		/* Allow unlimited locking of memory, so all memory needed for packet
@@ -206,6 +229,13 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 		}
 
 	}
+		if (axpc->cfg.xsk_poll_mode){
+                        memset(axpc->fds, 0, sizeof(axpc->fds));
+			axpc->fds[0].fd = xsk_socket__fd(axpc->xsk_socket->xsk);
+			axpc->fds[0].events = POLLIN;
+                }
+
+
 		//m-> initialize snd_list
 		axpc->snd_list = malloc(sizeof(struct snd_list_info));
 		axpc->snd_list->send_index = 0;
@@ -303,13 +333,25 @@ afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 	struct afxdp_private_context *axpc;
 	axpc = (struct afxdp_private_context *)ctxt->io_private_context;
 
+
+	int ret, nfds = 1;
+	if(axpc->cfg.xsk_poll_mode){
+		//ret = poll(axpc->fds, nfds, -1);
+		//ret = poll(axpc->fds, nfds, 2);
+		ret = poll(axpc->fds, nfds, 10);
+		if(ret < 1)
+			return 0;	
+
+	}
+
 	unsigned int rcvd, stock_frames, i;
 	uint32_t idx_fq = 0;
-	int ret = 0;
+	ret = 0;
 	rcvd = xsk_ring_cons__peek(&axpc->xsk_socket->rx, RX_BATCH_SIZE, &axpc->idx_rx);
+	//rcvd = xsk_ring_cons__peek(&axpc->xsk_socket->rx, 1, &axpc->idx_rx);
 
 	//if(rcvd > 0)
-	//	printf("af_xdp_ctx->idx_rx: %u\n", axpc->idx_rx);
+	//printf("af_xdp_ctx->idx_rx: %u, on cpu: %i\n", axpc->idx_rx, ctxt->cpu);
 
 	if (!rcvd)
 		return 0;
@@ -340,7 +382,7 @@ afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 
 			xsk_ring_prod__submit(&axpc->xsk_socket->umem->fq, stock_frames);
 		}
-
+//	printf("recvd: %i\n", rcvd);
 	return rcvd;
 }
 /*----------------------------------------------------------------------------*/
@@ -350,6 +392,7 @@ uint8_t
 *afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index, uint16_t *len)
 {
 	struct afxdp_private_context *axpc;
+	//printf("retrieving *rptr\n");
 	axpc = (struct afxdp_private_context *)ctxt->io_private_context;
 
 	axpc->addr = xsk_ring_cons__rx_desc(&axpc->xsk_socket->rx, axpc->idx_rx)->addr;
