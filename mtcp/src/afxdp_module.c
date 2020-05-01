@@ -172,6 +172,11 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 			sleep(2);
 		if (ctxt->cpu == 0){
 			printf("Initing XDP...\n");
+			char ethtool_command[50];
+	                sprintf(ethtool_command, "ethtool -L %s combined %i 2> /dev/null", ifname, CONFIG.num_cores);
+        	        system(ethtool_command);
+               		bzero(ethtool_command, sizeof(ethtool_command));
+
 		//	char ethtool_command[50];
 		//      	sprintf(ethtool_command, "ethtool -L %s combined %i", ifname, CONFIG.num_cores);
 			//printf("ifname: %s\n", ifname);

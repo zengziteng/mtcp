@@ -1,0 +1,3 @@
+make clean
+gcc -c -DDISABLE_ONVM -DDISABLE_PSIO -DDISABLE_DPDK -DDISABLE_NETMAP -I../../afxdp/libbpf/src//build/usr/include/ -g -I../../afxdp/headers/ -I./include -I../../io_engine/include/ -L../../afxdp/libbpf/src/ ../../afxdp/common/common_params.o ../../afxdp/common/common_user_bpf_xdp.o afxdp_module.c -l:libbpf.a -lelf -o afxdp_module.o
+make
