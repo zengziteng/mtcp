@@ -161,12 +161,6 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 		//m-> enable poll mode
 		axpc->cfg.xsk_poll_mode = 1;
 	
-		char ethtool_command[50];
-		sprintf(ethtool_command, "ethtool -L %s combined %i 2> /dev/null", ifname, CONFIG.num_cores);
-		system(ethtool_command);
-		bzero(ethtool_command, sizeof(ethtool_command));
-		//sprintf(ethtool_command, "ethtool -N ens1f1 rx-flow-hash tcp4 sdfn");
-		//system(ethtool_command);
 		//m-> load xdp ebpf program in the Kernel
 		if (ctxt->cpu != 0) //m-> change this to a pthread barrier
 			sleep(2);
