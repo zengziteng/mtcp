@@ -23,15 +23,7 @@ Modified by Marcelo Abranches for mTCP/AF_XDP integration
 #include <bpf/xsk.h>
 
 #include "afxdp_module.h"
-/* for AF_XDP related def'ns */
-//#include "../../afxdp/common/common_params.h"
-//#include "../../afxdp/common/common_user_bpf_xdp.h"
-//#define MAX_PKT_BURST 64
 
-//#define NUM_FRAMES         4096
-//#define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
-//#define RX_BATCH_SIZE      64
-//#define INVALID_UMEM_FRAME UINT64_MAX
 
 /* for mtcp related def'ns */
 #include "mtcp.h"
@@ -79,7 +71,6 @@ struct afxdp_private_context { //private context on mTCP
 /*----------------------------------------------------------------------------*/
 void complete_tx(struct afxdp_private_context *axpc)
 {
-        //m-> this looks like a simple mechanism
         unsigned int completed;
         uint32_t idx_cq;
 
@@ -90,15 +81,12 @@ void complete_tx(struct afxdp_private_context *axpc)
         sendto(xsk_socket__fd(axpc->xsk_socket->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 
-        /* Collect/free completed TX buffers */
         //m-> now the completition queue is queried to see
         //which UMEM memmory frames can be freed and reused
         //to receive packets (so cq is the completition queue)
         completed = xsk_ring_cons__peek(&axpc->xsk_socket->umem->cq,
                                         XSK_RING_CONS__DEFAULT_NUM_DESCS,
                                         &idx_cq);
-
-        //printf("completed transmission: %i\n", completed);
 
         if (completed > 0) {
                 for (int i = 0; i < completed; i++)
@@ -114,7 +102,6 @@ void complete_tx(struct afxdp_private_context *axpc)
 }
 
 /*----------------------------------------------------------------------------*/
-//void config_af_xdp(struct config cfg, struct af_xdp_context *af_xdp_ctx)
 void
 afxdp_init_handle(struct mtcp_thread_context *ctxt)
 {
@@ -122,8 +109,6 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 	char ifname[MAX_IFNAMELEN];
 	char nifname[MAX_IFNAMELEN];
 	int j;
-//	char ethtool_command[50];
-//        sprintf(ethtool_command, "ethtool -L %s combined %i", ifname, CONFIG.num_cores);
 
 
 	/* create and initialize private I/O module context */
@@ -140,7 +125,6 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 	struct rlimit rlim = {RLIM_INFINITY, RLIM_INFINITY};
 
 	//m-> come back here to evaluate the multiple interface scenario
-	//for (j = 0; j < num_devices_attached; j++) {
 	for (j = 0; j < num_devices_attached; j++) {
 		if (if_indextoname(devices_attached[j], ifname) == NULL) {
 			TRACE_ERROR("Failed to initialize interface %s with ifidx: %d - "
@@ -152,7 +136,7 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
 		axpc->bpf_obj = NULL;
 		axpc->cfg.ifindex = devices_attached[j]; //(enp0s8) m-> 3 if not getting correctly from mTCP
 		axpc->cfg.do_unload = 0;
-		sprintf(axpc->cfg.filename, "../../afxdp/afxdp_kern.o");
+		sprintf(axpc->cfg.filename, "../../afxdp/mtcp_xdp_pktio/afxdp_kern.o");
 		sprintf(axpc->cfg.progsec, "xdp_sock");
 		axpc->cfg.ifname = malloc(MAX_IFNAMELEN);
 		axpc->cfg.ifname = ifname;
@@ -171,9 +155,6 @@ afxdp_init_handle(struct mtcp_thread_context *ctxt)
         	        system(ethtool_command);
                		bzero(ethtool_command, sizeof(ethtool_command));
 
-		//	char ethtool_command[50];
-		//      	sprintf(ethtool_command, "ethtool -L %s combined %i", ifname, CONFIG.num_cores);
-			//printf("ifname: %s\n", ifname);
 			axpc->bpf_obj = load_bpf_and_xdp_attach(&axpc->cfg);
 			if (!axpc->bpf_obj) {
 				/* Error handling done in load_bpf_and_xdp_attach() */
@@ -250,7 +231,6 @@ afxdp_link_devices(struct mtcp_thread_context *ctxt)
 void
 afxdp_release_pkt(struct mtcp_thread_context *ctxt, int ifidx, unsigned char *pkt_data, int len){
 	struct afxdp_private_context *axpc;
-	//printf("afxdp_release_pkt\n");
 	axpc = (struct afxdp_private_context *)ctxt->io_private_context;
 
 	xsk_free_umem_frame(axpc->xsk_socket, axpc->addr);
@@ -275,8 +255,6 @@ afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif)
 	uint64_t len;
 	int ret = 0;
 
-	//printf("Sending data ...\n");
-	//printf("outstanding_tx %i\n", axpc->xsk_socket->outstanding_tx);
 	ret = xsk_ring_prod__reserve (&axpc->xsk_socket->tx, axpc->snd_list->send_index, &axpc->idx_tx);
 
 	for (int i = 0; i < axpc->snd_list->send_index; i++)
@@ -289,7 +267,6 @@ afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif)
 		xsk_ring_prod__tx_desc(&axpc->xsk_socket->tx, axpc->idx_tx++)->len = len;
 
 		axpc->xsk_socket->outstanding_tx++;
-		//printf("outstanding_tx %i\n", axpc->xsk_socket->outstanding_tx);
 
 #ifdef NETSTAT  //m-> Review this
 		mtcp->nstat.tx_packets[nif]++;
@@ -314,7 +291,6 @@ uint8_t
 	uint64_t addr;
 	//m-> should I use pktsize (len) anywhere?
 	addr = xsk_alloc_umem_frame(axpc->xsk_socket);
-	//af_xdp_ctx->addr = xsk_alloc_umem_frame(af_xdp_ctx->xsk_socket);
 
 	uint8_t *pktbuf = xsk_umem__get_data(axpc->xsk_socket->umem->buffer, addr);
 
@@ -325,7 +301,6 @@ uint8_t
 	return pktbuf;
 }
 /*----------------------------------------------------------------------------*/
-//static void handle_receive_packets(struct xsk_socket_info *xsk)
 int32_t
 afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 {
@@ -335,8 +310,6 @@ afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 
 	int ret, nfds = 1;
 	if(axpc->cfg.xsk_poll_mode){
-		//ret = poll(axpc->fds, nfds, -1);
-		//ret = poll(axpc->fds, nfds, 2);
 		ret = poll(axpc->fds, nfds, 10);
 		if(ret < 1)
 			return 0;	
@@ -347,16 +320,10 @@ afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 	uint32_t idx_fq = 0;
 	ret = 0;
 	rcvd = xsk_ring_cons__peek(&axpc->xsk_socket->rx, RX_BATCH_SIZE, &axpc->idx_rx);
-	//rcvd = xsk_ring_cons__peek(&axpc->xsk_socket->rx, 1, &axpc->idx_rx);
-
-	//if(rcvd > 0)
-	//printf("af_xdp_ctx->idx_rx: %u, on cpu: %i\n", axpc->idx_rx, ctxt->cpu);
 
 	if (!rcvd)
 		return 0;
 
-		/* Stuff the ring with as much frames as possible */
-		//m-> fq is the fill queue
 		stock_frames = xsk_prod_nb_free(&axpc->xsk_socket->umem->fq,
 					xsk_umem_free_frames(axpc->xsk_socket));
 
@@ -381,7 +348,6 @@ afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx)
 
 			xsk_ring_prod__submit(&axpc->xsk_socket->umem->fq, stock_frames);
 		}
-//	printf("recvd: %i\n", rcvd);
 	return rcvd;
 }
 /*----------------------------------------------------------------------------*/
@@ -391,7 +357,6 @@ uint8_t
 *afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index, uint16_t *len)
 {
 	struct afxdp_private_context *axpc;
-	//printf("retrieving *rptr\n");
 	axpc = (struct afxdp_private_context *)ctxt->io_private_context;
 
 	axpc->addr = xsk_ring_cons__rx_desc(&axpc->xsk_socket->rx, axpc->idx_rx)->addr;
@@ -440,21 +405,5 @@ io_module_func afxdp_module_func = {
 	.release_rx_ring	   = afxdp_release_rx_ring,
 	.dev_ioctl		   = NULL
 };
-/*----------------------------------------------------------------------------*/
-/*#else
-io_module_func afxdp_module_func = {
-	.load_module		   = NULL,
-	.init_handle		   = NULL,
-	.link_devices		   = NULL,
-	.release_pkt		   = NULL,
-	.send_pkts		   = NULL,
-	.get_wptr   		   = NULL,
-	.recv_pkts		   = NULL,
-	.get_rptr	   	   = NULL,
-	.select			   = NULL,
-	.destroy_handle		   = NULL,
-	.release_rx_ring	   = NULL,
-	.dev_ioctl		   = NULL
-};*/
 /*----------------------------------------------------------------------------*/
 #endif /* !DISABLE_AFXDP */
