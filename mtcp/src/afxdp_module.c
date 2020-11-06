@@ -262,7 +262,7 @@ afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif)
 		addr = axpc->snd_list->addrs[i];
 		len = axpc->snd_list->lens[i];
 
-		//m->generate file descriptors as in my notebook page 51.
+		//m->generate descriptors as in my notebook page 51.
 		xsk_ring_prod__tx_desc(&axpc->xsk_socket->tx, axpc->idx_tx)->addr = addr;
 		xsk_ring_prod__tx_desc(&axpc->xsk_socket->tx, axpc->idx_tx++)->len = len;
 
