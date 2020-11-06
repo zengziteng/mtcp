@@ -1,0 +1,10 @@
+#!/bin/bash
+
+cd afxdp/common/
+make clean
+make
+
+cd ../../
+
+cd mtcp/src/
+./compile

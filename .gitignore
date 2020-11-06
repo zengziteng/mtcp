@@ -1,5 +1,5 @@
 # mtcp-specific files
-Makefile
+#Makefile
 autom4te.cache/
 config.h
 config.log
