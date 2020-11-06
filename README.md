@@ -29,7 +29,8 @@ installation.
 
 ### AF_XDP support
 Tested with Ubuntu 18.04.1 LTS Kernel 5.3.0-61-generic
-Please compile with ./compile_afxdp_support
+
+Please compile using ./compile_afxdp_support
 
 ### CCP support
 
