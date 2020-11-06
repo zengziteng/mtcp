@@ -27,6 +27,10 @@ created a new LKM dpdk-iface-kmow. We also modified
 process of mTCP applications. We recommend using our package for DPDK
 installation.
 
+### AF_XDP support
+Tested with Ubuntu 18.04.1 LTS Kernel 5.3.0-61-generic
+Please compile with ./compile_afxdp_support
+
 ### CCP support
 
 You can optionally use [CCP](https://ccp-project.github.io/)'s congestion 
