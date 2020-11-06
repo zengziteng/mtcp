@@ -16,8 +16,8 @@
 #include <signal.h>
 #include <limits.h>
 
-#include <mtcp_api.h>
-#include <mtcp_epoll.h>
+#include "mtcp_api.h"
+#include "mtcp_epoll.h"
 
 #include "cpu.h"
 #include "http_parsing.h"

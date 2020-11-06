@@ -112,7 +112,7 @@ EnrollRouteTableEntry(char *optstr)
 {
 	char *daddr_s;
 	char *prefix;
-#ifdef DISABLE_NETMAP 
+#ifdef DISABLE_AFXDP
 	char *dev;
 	int i;
 #endif
@@ -123,12 +123,12 @@ EnrollRouteTableEntry(char *optstr)
 	saveptr = NULL;
 	daddr_s = strtok_r(optstr, "/", &saveptr);
 	prefix = strtok_r(NULL, " ", &saveptr);
-#ifdef DISABLE_NETMAP
+#ifdef DISABLE_AFXDP
 	dev = strtok_r(NULL, "\n", &saveptr);
 #endif
 	assert(daddr_s != NULL);
 	assert(prefix != NULL);
-#ifdef DISABLE_NETMAP	
+#ifdef DISABLE_AFXDP
 	assert(dev != NULL);
 #endif
 

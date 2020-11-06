@@ -781,9 +781,7 @@ RunMainLoop(struct mtcp_thread_context *ctx)
 		gettimeofday(&cur_ts, NULL);
 		ts = TIMEVAL_TO_TS(&cur_ts);
 		mtcp->cur_ts = ts;
-
 		for (rx_inf = 0; rx_inf < CONFIG.eths_num; rx_inf++) {
-
 			static uint16_t len;
 			static uint8_t *pktbuf;
 			recv_cnt = mtcp->iom->recv_pkts(ctx, rx_inf);
@@ -791,13 +789,20 @@ RunMainLoop(struct mtcp_thread_context *ctx)
 
 			for (i = 0; i < recv_cnt; i++) {
 				pktbuf = mtcp->iom->get_rptr(mtcp->ctx, rx_inf, i, &len);
-				if (pktbuf != NULL)
+				if (pktbuf != NULL){
 					ProcessPacket(mtcp, rx_inf, ts, pktbuf, len);
-#ifdef NETSTAT
+#ifndef DISABLE_AFXDP
+					mtcp->iom->release_pkt(mtcp->ctx, rx_inf, pktbuf, len);
+#endif
+				}
+#ifdef NETSTAT 
 				else
 					mtcp->nstat.rx_errors[rx_inf]++;
 #endif
 			}
+#ifndef DISABLE_AFXDP
+			mtcp->iom->release_rx_ring(mtcp->ctx, recv_cnt);
+#endif
 		}
 		STAT_COUNT(mtcp->runstat.rounds_rx);
 

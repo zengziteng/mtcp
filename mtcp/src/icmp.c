@@ -89,7 +89,6 @@ ProcessICMPECHORequest(mtcp_manager_t mtcp, struct iphdr *iph, int len)
 {
 	int ret = 0;
 	struct icmphdr *icmph = (struct icmphdr *) IP_NEXT_PTR(iph);
-	
 	/* Check correctness of ICMP checksum and send ICMP echo reply */
 	if (ICMPChecksum((uint16_t *) icmph, len - (iph->ihl << 2)) )
 		ret = ERROR;
