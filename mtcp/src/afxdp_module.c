@@ -81,9 +81,9 @@ void complete_tx(struct afxdp_private_context *axpc)
         sendto(xsk_socket__fd(axpc->xsk_socket->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 
-        //m-> now the completition queue is queried to see
+        //m-> now the completion queue is queried to see
         //which UMEM memmory frames can be freed and reused
-        //to receive packets (so cq is the completition queue)
+        //to receive packets (so cq is the completion queue)
         completed = xsk_ring_cons__peek(&axpc->xsk_socket->umem->cq,
                                         XSK_RING_CONS__DEFAULT_NUM_DESCS,
                                         &idx_cq);
