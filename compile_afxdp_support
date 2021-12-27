@@ -1,22 +1,19 @@
 #!/bin/bash
 
+cd afxdp/libbpf/src/
+make clean
+make
+sudo make install
 
-cd afxdp/mtcp_xdp_pktio/
+cd ../../mtcp_xdp_pktio/
+make clean
+make
+
+cd ../common/
 make clean
 make
 
 cd ../../
-
-
-cd afxdp/common/
-make clean
-make
-
-cd ../libbpf/src/
-make clean
-make
-
-cd ../../../
 
 cd mtcp/src/
 ./compile

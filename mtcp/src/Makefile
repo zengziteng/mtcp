@@ -161,8 +161,7 @@ endif
 #default: $(OBJS) afxdp_module.o $(MTCP_HDR)
 default: $(OBJS) $(MTCP_HDR)
 	mkdir -p $(MTCP_LIB_DIR)
-	#ar rvs $(MTCP_LIB_DIR)/$(MTCP_LIB) $(OBJS) afxdp_module.o ../../afxdp/common/common_params.o ../../afxdp/common/common_user_bpf_xdp.o
-	ar rvs $(MTCP_LIB_DIR)/$(MTCP_LIB) $(OBJS) afxdp_module.o /home/vagrant/AF_XDP/common//common_params.o /home/vagrant/AF_XDP/common//common_user_bpf_xdp.o
+	ar rvs $(MTCP_LIB_DIR)/$(MTCP_LIB) $(OBJS) afxdp_module.o ../../afxdp/common/common_params.o ../../afxdp/common/common_user_bpf_xdp.o
 	#ar rvs $(MTCP_LIB_DIR)/$(MTCP_LIB) $(OBJS) 
 
 ifeq ($(CCP), 1)

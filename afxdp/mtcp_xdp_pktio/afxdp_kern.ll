@@ -11,43 +11,44 @@ target triple = "bpf"
 @llvm.used = appending global [3 x i8*] [i8* getelementptr inbounds ([4 x i8], [4 x i8]* @_license, i32 0, i32 0), i8* bitcast (i32 (%struct.xdp_md*)* @xdp_sock_prog to i8*), i8* bitcast (%struct.bpf_map_def* @xsks_map to i8*)], section "llvm.metadata"
 
 ; Function Attrs: nounwind
-define dso_local i32 @xdp_sock_prog(%struct.xdp_md* nocapture readonly) #0 section "xdp_sock" !dbg !52 {
+define dso_local i32 @xdp_sock_prog(%struct.xdp_md* nocapture readonly %0) #0 section "xdp_sock" !dbg !52 {
   %2 = alloca i32, align 4
   call void @llvm.dbg.value(metadata %struct.xdp_md* %0, metadata !64, metadata !DIExpression()), !dbg !66
   %3 = bitcast i32* %2 to i8*, !dbg !67
   call void @llvm.lifetime.start.p0i8(i64 4, i8* nonnull %3) #3, !dbg !67
   %4 = getelementptr inbounds %struct.xdp_md, %struct.xdp_md* %0, i64 0, i32 4, !dbg !68
   %5 = load i32, i32* %4, align 4, !dbg !68, !tbaa !69
-  call void @llvm.dbg.value(metadata i32 %5, metadata !65, metadata !DIExpression()), !dbg !74
+  call void @llvm.dbg.value(metadata i32 %5, metadata !65, metadata !DIExpression()), !dbg !66
   store i32 %5, i32* %2, align 4, !dbg !74, !tbaa !75
+  call void @llvm.dbg.value(metadata i32* %2, metadata !65, metadata !DIExpression(DW_OP_deref)), !dbg !66
   %6 = call i8* inttoptr (i64 1 to i8* (i8*, i8*)*)(i8* bitcast (%struct.bpf_map_def* @xsks_map to i8*), i8* nonnull %3) #3, !dbg !76
   %7 = icmp eq i8* %6, null, !dbg !76
   br i1 %7, label %11, label %8, !dbg !78
 
-; <label>:8:                                      ; preds = %1
+8:                                                ; preds = %1
   %9 = load i32, i32* %2, align 4, !dbg !79, !tbaa !75
-  call void @llvm.dbg.value(metadata i32 %9, metadata !65, metadata !DIExpression()), !dbg !74
+  call void @llvm.dbg.value(metadata i32 %9, metadata !65, metadata !DIExpression()), !dbg !66
   %10 = call i32 inttoptr (i64 51 to i32 (i8*, i32, i64)*)(i8* bitcast (%struct.bpf_map_def* @xsks_map to i8*), i32 %9, i64 0) #3, !dbg !80
   br label %11, !dbg !81
 
-; <label>:11:                                     ; preds = %1, %8
+11:                                               ; preds = %1, %8
   %12 = phi i32 [ %10, %8 ], [ 2, %1 ], !dbg !82
   call void @llvm.lifetime.end.p0i8(i64 4, i8* nonnull %3) #3, !dbg !83
   ret i32 %12, !dbg !83
 }
 
-; Function Attrs: argmemonly nounwind
-declare void @llvm.lifetime.start.p0i8(i64, i8* nocapture) #1
+; Function Attrs: argmemonly nounwind willreturn
+declare void @llvm.lifetime.start.p0i8(i64 immarg, i8* nocapture) #1
 
-; Function Attrs: argmemonly nounwind
-declare void @llvm.lifetime.end.p0i8(i64, i8* nocapture) #1
+; Function Attrs: argmemonly nounwind willreturn
+declare void @llvm.lifetime.end.p0i8(i64 immarg, i8* nocapture) #1
 
-; Function Attrs: nounwind readnone speculatable
+; Function Attrs: nounwind readnone speculatable willreturn
 declare void @llvm.dbg.value(metadata, metadata, metadata) #2
 
-attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "less-precise-fpmad"="false" "min-legal-vector-width"="0" "no-frame-pointer-elim"="true" "no-frame-pointer-elim-non-leaf" "no-infs-fp-math"="false" "no-jump-tables"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "unsafe-fp-math"="false" "use-soft-float"="false" }
-attributes #1 = { argmemonly nounwind }
-attributes #2 = { nounwind readnone speculatable }
+attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "frame-pointer"="all" "less-precise-fpmad"="false" "min-legal-vector-width"="0" "no-infs-fp-math"="false" "no-jump-tables"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "unsafe-fp-math"="false" "use-soft-float"="false" }
+attributes #1 = { argmemonly nounwind willreturn }
+attributes #2 = { nounwind readnone speculatable willreturn }
 attributes #3 = { nounwind }
 
 !llvm.dbg.cu = !{!2}
@@ -56,11 +57,11 @@ attributes #3 = { nounwind }
 
 !0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
 !1 = distinct !DIGlobalVariable(name: "xsks_map", scope: !2, file: !3, line: 11, type: !40, isLocal: false, isDefinition: true)
-!2 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: "clang version 8.0.0-3 (tags/RELEASE_800/final)", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, enums: !4, globals: !14, nameTableKind: None)
-!3 = !DIFile(filename: "afxdp_kern.c", directory: "/home/vagrant/mtcp/afxdp/mtcp_xdp_pktio")
+!2 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: "clang version 10.0.0-4ubuntu1 ", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, enums: !4, globals: !14, splitDebugInlining: false, nameTableKind: None)
+!3 = !DIFile(filename: "afxdp_kern.c", directory: "/mydata/mtcp/afxdp/mtcp_xdp_pktio")
 !4 = !{!5}
 !5 = !DICompositeType(tag: DW_TAG_enumeration_type, name: "xdp_action", file: !6, line: 2845, baseType: !7, size: 32, elements: !8)
-!6 = !DIFile(filename: "../headers/linux/bpf.h", directory: "/home/vagrant/mtcp/afxdp/mtcp_xdp_pktio")
+!6 = !DIFile(filename: "../headers/linux/bpf.h", directory: "/mydata/mtcp/afxdp/mtcp_xdp_pktio")
 !7 = !DIBasicType(name: "unsigned int", size: 32, encoding: DW_ATE_unsigned)
 !8 = !{!9, !10, !11, !12, !13}
 !9 = !DIEnumerator(name: "XDP_ABORTED", value: 0, isUnsigned: true)
@@ -102,11 +103,11 @@ attributes #3 = { nounwind }
 !45 = !DIDerivedType(tag: DW_TAG_member, name: "value_size", scope: !40, file: !41, line: 36, baseType: !7, size: 32, offset: 64)
 !46 = !DIDerivedType(tag: DW_TAG_member, name: "max_entries", scope: !40, file: !41, line: 37, baseType: !7, size: 32, offset: 96)
 !47 = !DIDerivedType(tag: DW_TAG_member, name: "map_flags", scope: !40, file: !41, line: 38, baseType: !7, size: 32, offset: 128)
-!48 = !{i32 2, !"Dwarf Version", i32 4}
+!48 = !{i32 7, !"Dwarf Version", i32 4}
 !49 = !{i32 2, !"Debug Info Version", i32 3}
 !50 = !{i32 1, !"wchar_size", i32 4}
-!51 = !{!"clang version 8.0.0-3 (tags/RELEASE_800/final)"}
-!52 = distinct !DISubprogram(name: "xdp_sock_prog", scope: !3, file: !3, line: 20, type: !53, scopeLine: 21, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !2, retainedNodes: !63)
+!51 = !{!"clang version 10.0.0-4ubuntu1 "}
+!52 = distinct !DISubprogram(name: "xdp_sock_prog", scope: !3, file: !3, line: 20, type: !53, scopeLine: 21, flags: DIFlagPrototyped | DIFlagAllCallsDescribed, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !2, retainedNodes: !63)
 !53 = !DISubroutineType(types: !54)
 !54 = !{!35, !55}
 !55 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !56, size: 64)
@@ -120,7 +121,7 @@ attributes #3 = { nounwind }
 !63 = !{!64, !65}
 !64 = !DILocalVariable(name: "ctx", arg: 1, scope: !52, file: !3, line: 20, type: !55)
 !65 = !DILocalVariable(name: "index", scope: !52, file: !3, line: 23, type: !35)
-!66 = !DILocation(line: 20, column: 34, scope: !52)
+!66 = !DILocation(line: 0, scope: !52)
 !67 = !DILocation(line: 23, column: 5, scope: !52)
 !68 = !DILocation(line: 23, column: 22, scope: !52)
 !69 = !{!70, !71, i64 16}
