@@ -1,6 +1,6 @@
 #pragma once
 
-//#define SERVERLESS_DBG
+#define SERVERLESS_DBG
 
 #define RPC_PORT 8081
 #define SK_MSG_PORT 8082

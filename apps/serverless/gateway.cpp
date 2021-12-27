@@ -255,7 +255,7 @@ int main(int argc, char* argv[]) {
     ret = mtcp_bind(mctx, listenfd, (struct sockaddr*)&srv_addr, sizeof(srv_addr));
     assert(ret == 0);
 
-    ret = mtcp_listen(mctx, listenfd, 1000);
+    ret = mtcp_listen(mctx, listenfd, 10000);
     assert(ret == 0);
 
     events = new mtcp_epoll_event[mcfg.max_num_buffers];
@@ -320,7 +320,7 @@ int main(int argc, char* argv[]) {
                 }
             }else{
                 #ifdef SERVERLESS_DBG
-                printf("socket: client    event: %s %s\n", eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "");
+                printf("socket: client  eventid: %d  event: %s %s\n", eventid, eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "");
                 #endif
                 if(eventid & MTCP_EPOLLIN) {
                     RequestFrame* p_request_frame = (RequestFrame*)events[i].data.ptr;
