@@ -90,7 +90,7 @@ int main(int argc, char* argv[]) {
 
         char* buffer = &p_response_frame->data[p_response_frame->header_len + p_response_frame->data_len];
         int newLen = sprintf(buffer,
-                "Function %5d processing, time: %20ld, delta time: %20ld\n", fun_id, timestamp, timestamp - meta.timestamp);
+                "Function %d processing, time: %ld, delta time: %ld\n", fun_id, timestamp, timestamp - meta.timestamp);
         p_response_frame->data_len += newLen;
 
         Meta meta_send;
