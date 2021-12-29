@@ -56,9 +56,10 @@ const char* http_response_header =
 int http_response_header_len = strlen(http_response_header);
 mctx_t mctx;
 int ep_id;
+const char* rpc_ip = NULL;
 
 struct Server{
-    rpc::server rpc_srv = rpc::server(RPC_PORT);
+    rpc::server *rpc_srv;
 
     // the segment id of shared memory
     int segment_id;
@@ -76,6 +77,8 @@ struct Server{
     int frames[SHARED_MEM_FRAME_CNT];
 
     void create() {
+        rpc_srv = new rpc::server(rpc_ip, RPC_PORT);
+
         segment_id = shmget(rand(), SHARED_MEM_SIZE, IPC_CREAT | 0666);
         assert(segment_id != -1);
 
@@ -111,7 +114,7 @@ struct Server{
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
         addr.sin_port = htons(SK_MSG_PORT);
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        addr.sin_addr.s_addr = inet_addr(rpc_ip);
 
         ret = bind(dummy_server_socket_fd, (struct sockaddr*)&addr, sizeof(addr));
         assert(ret == 0);
@@ -139,8 +142,8 @@ struct Server{
         assert(ret == 0);
 
         // add rpc
-        rpc_srv.bind(RPC_GET_SHM_SEGMENT_ID, [this](){return this->segment_id;});
-        rpc_srv.bind(RPC_UPDATE_SOCKMAP, [this](int fun_pid, int fun_sk_msg_sock_fd, int key){
+        rpc_srv->bind(RPC_GET_SHM_SEGMENT_ID, [this](){return this->segment_id;});
+        rpc_srv->bind(RPC_UPDATE_SOCKMAP, [this](int fun_pid, int fun_sk_msg_sock_fd, int key){
             int pidfd = syscall(SYS_pidfd_open, fun_pid, 0);
             assert(pidfd != -1);
 
@@ -168,7 +171,7 @@ struct Server{
 
     void run_rpc_async() {
         std::thread t([this](){
-            this->rpc_srv.run();
+            this->rpc_srv->run();
         });
         t.detach();
     }
@@ -221,6 +224,11 @@ struct Server{
     
 };
 
+void usage() {
+    printf("Usage: ./gateway {-b (bind ip for rpc and sk_msg)}\n");
+    exit(1);
+}
+
 int main(int argc, char* argv[]) {
     
     struct mtcp_conf mcfg;
@@ -230,6 +238,26 @@ int main(int argc, char* argv[]) {
     int ret;
     struct mtcp_epoll_event *events;
 	struct mtcp_epoll_event ev;
+
+    while(1) {
+        int opt = getopt(argc, argv, "b:");
+        if(opt == -1){
+            break;
+        }
+
+        switch(opt)
+        {
+            case 'b':
+                rpc_ip = optarg;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if(rpc_ip == NULL) {
+        usage();
+    }
     
 
     Server server;

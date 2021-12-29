@@ -30,18 +30,54 @@
 
 #include "serverless.h"
 
+const char* gateway_rpc_ip = NULL;
+
+void usage() {
+    printf("Usage: ./function {-i function_id} {-n next_function_id} {-g gateway_rpc_ip} [-c bind_to_cpu_core]\n");
+    exit(1);
+}
+
 int main(int argc, char* argv[]) {
     char* data;
     int skmsg_socket_fd;
     int segment_id;
 
-    if(argc != 3) {
-        printf("Usage: ./function {function_id} {next_function_id}\n");
-        return 0;
+    int fun_id = -1;
+    int next_fun_id = -1;
+    int bind_to_cpu_core = -1;
+
+    while(1) {
+        int opt = getopt(argc, argv, "i:n:c:g:");
+        if(opt == -1){
+            break;
+        }
+
+        switch(opt)
+        {
+            case 'i':
+                fun_id = atoi(optarg);
+                break;
+            case 'n':
+                next_fun_id = atoi(optarg);
+                break;
+            case 'c':
+                bind_to_cpu_core = atoi(optarg);
+                break;
+            case 'g':
+                gateway_rpc_ip = optarg;
+                break;
+            default:
+                break;
+        }
+    }
+    if(fun_id == -1 || next_fun_id == -1 || gateway_rpc_ip == NULL) {
+        usage();
     }
 
-    int fun_id = atoi(argv[1]);
-    int next_fun_id = atoi(argv[2]);
+    if(bind_to_cpu_core == -1) {
+        printf("using function id as cpu core id for binding\n");
+        bind_to_cpu_core = fun_id;
+    }
 
     cpu_set_t mask;
     CPU_ZERO(&mask);
@@ -49,7 +85,7 @@ int main(int argc, char* argv[]) {
     int ret = sched_setaffinity(0, sizeof(mask), &mask);
     assert(ret == 0);
 
-    rpc::client rpc_client("127.0.0.1", RPC_PORT);
+    rpc::client rpc_client(gateway_rpc_ip, RPC_PORT);
     segment_id = rpc_client.call(RPC_GET_SHM_SEGMENT_ID).as<int>();
     assert(segment_id != -1);
 
@@ -68,7 +104,7 @@ int main(int argc, char* argv[]) {
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(SK_MSG_PORT);
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_addr.s_addr = inet_addr(gateway_rpc_ip);
 
     ret = connect(skmsg_socket_fd, (struct sockaddr*)&addr, sizeof(addr));
     assert(ret == 0);
