@@ -26,6 +26,7 @@
 #include <linux/ip.h>
 #include <linux/in.h>
 #include <linux/tcp.h>
+#include <sched.h>
 
 #include "serverless.h"
 
@@ -41,6 +42,12 @@ int main(int argc, char* argv[]) {
 
     int fun_id = atoi(argv[1]);
     int next_fun_id = atoi(argv[2]);
+
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(fun_id, &mask);
+    int ret = sched_setaffinity(0, sizeof(mask), &mask);
+    assert(ret == 0);
 
     rpc::client rpc_client("127.0.0.1", RPC_PORT);
     segment_id = rpc_client.call(RPC_GET_SHM_SEGMENT_ID).as<int>();
@@ -63,7 +70,7 @@ int main(int argc, char* argv[]) {
     addr.sin_port = htons(SK_MSG_PORT);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    int ret = connect(skmsg_socket_fd, (struct sockaddr*)&addr, sizeof(addr));
+    ret = connect(skmsg_socket_fd, (struct sockaddr*)&addr, sizeof(addr));
     assert(ret == 0);
 
     rpc_client.call(RPC_UPDATE_SOCKMAP, (int)getpid(), skmsg_socket_fd, fun_id);
@@ -82,9 +89,8 @@ int main(int argc, char* argv[]) {
         ResponseFrame* p_response_frame = (ResponseFrame*)&data[meta.frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
 
         char* buffer = &p_response_frame->data[p_response_frame->header_len + p_response_frame->data_len];
-        sprintf(buffer,
-                "Function %d processing, time: %ld, delta time: %ld\n", fun_id, timestamp, timestamp - meta.timestamp);
-        int newLen = strlen(buffer);
+        int newLen = sprintf(buffer,
+                "Function %5d processing, time: %20ld, delta time: %20ld\n", fun_id, timestamp, timestamp - meta.timestamp);
         p_response_frame->data_len += newLen;
 
         Meta meta_send;
