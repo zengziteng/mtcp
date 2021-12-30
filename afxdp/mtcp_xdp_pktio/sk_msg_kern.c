@@ -39,13 +39,13 @@ int bpf_tcpip_bypass(struct sk_msg_md *msg)
 {
     char* data = msg->data;
     char* data_end = msg->data_end;
-    bpf_printk("[sk_msg] get a packet of length %d", msg->size);
+    //bpf_printk("[sk_msg] get a packet of length %d", msg->size);
 
     if(data + 4 > data_end) {
         return SK_DROP;
     }
     int key = *((int*)data);
-    bpf_printk("[sk_msg] redirect to socket at array position %d", key);
+    //bpf_printk("[sk_msg] redirect to socket at array position %d", key);
 
     return bpf_msg_redirect_map(msg, &sock_map, key, BPF_F_INGRESS);
     // if(ret == SK_PASS) {
