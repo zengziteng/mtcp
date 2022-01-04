@@ -79,7 +79,6 @@ int main(int argc, char* argv[]) {
         bind_to_cpu_core = fun_id;
     }
 
-    int ret;
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(fun_id, &mask);
