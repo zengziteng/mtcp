@@ -79,11 +79,12 @@ int main(int argc, char* argv[]) {
         bind_to_cpu_core = fun_id;
     }
 
-    cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(fun_id, &mask);
-    int ret = sched_setaffinity(0, sizeof(mask), &mask);
-    assert(ret == 0);
+    int ret;
+    // cpu_set_t mask;
+    // CPU_ZERO(&mask);
+    // CPU_SET(fun_id, &mask);
+    // int ret = sched_setaffinity(0, sizeof(mask), &mask);
+    // assert(ret == 0);
 
     rpc::client rpc_client(gateway_rpc_ip, RPC_PORT);
     segment_id = rpc_client.call(RPC_GET_SHM_SEGMENT_ID).as<int>();
