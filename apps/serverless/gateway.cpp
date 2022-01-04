@@ -47,6 +47,36 @@
 
 #define HTTP_PORT 8080
 
+struct spinlock {
+  std::atomic<bool> lock_ = {0};
+
+  void lock() noexcept {
+    for (;;) {
+      // Optimistically assume the lock is free on the first try
+      if (!lock_.exchange(true, std::memory_order_acquire)) {
+        return;
+      }
+      // Wait for lock to be released without generating cache misses
+      while (lock_.load(std::memory_order_relaxed)) {
+        // Issue X86 PAUSE or ARM YIELD instruction to reduce contention between
+        // hyper-threads
+        __builtin_ia32_pause();
+      }
+    }
+  }
+
+  bool try_lock() noexcept {
+    // First do a relaxed load to check if lock is free in order to prevent
+    // unnecessary cache misses if someone does while(!try_lock())
+    return !lock_.load(std::memory_order_relaxed) &&
+           !lock_.exchange(true, std::memory_order_acquire);
+  }
+
+  void unlock() noexcept {
+    lock_.store(false, std::memory_order_release);
+  }
+};
+
 const char* http_response_header = 
 "HTTP/1.1 200 OK\r\n"
 "Connection: close\r\n"
@@ -57,6 +87,7 @@ int http_response_header_len = strlen(http_response_header);
 mctx_t mctx;
 int ep_id;
 const char* rpc_ip = NULL;
+std::map<int, int> frameMap; // key: sockid  value: frame
 
 struct Server{
     rpc::server *rpc_srv;
@@ -75,6 +106,7 @@ struct Server{
     // the index in frames array
     int next_free_idx = 0;
     int frames[SHARED_MEM_FRAME_CNT];
+    spinlock alloc_lock;
 
     void create() {
         rpc_srv = new rpc::server(rpc_ip, RPC_PORT);
@@ -160,13 +192,18 @@ struct Server{
     }
 
     int allocate_frame() {
+        alloc_lock.lock();
         assert(next_free_idx != SHARED_MEM_FRAME_CNT);
-        return frames[next_free_idx++];
+        int ret = frames[next_free_idx++];
+        alloc_lock.unlock();
+        return ret;
     }
 
     void free_frame(int frame) {
         assert(frame != -1);
+        alloc_lock.lock();
         frames[--next_free_idx] = frame;
+        alloc_lock.unlock();
     }
 
     void run_rpc_async() {
@@ -186,40 +223,58 @@ struct Server{
         assert(ret == sizeof(meta));
     }
 
-    void run_skmsg_egress() {
-        Meta meta;
-        int ret = recv(this->skmsg_socket_fd, &meta, sizeof(meta), MSG_DONTWAIT);
-        if(ret == -1) {
-            assert(errno == EAGAIN || errno == EWOULDBLOCK);
-            return;
-        }
-        assert(ret == sizeof(meta));
+    void run_skmsg_egress_async() {
+        std::thread t([this](){
+            while(true) {
+                Meta meta;
+                int ret = recv(this->skmsg_socket_fd, &meta, sizeof(meta), 0);
 
-        #ifdef SERVERLESS_DBG
-        printf("send http response back to client\n");
-        #endif
+                if(ret == -1) {
+                    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+                    return;
+                }
+                assert(ret == sizeof(meta));
 
-        RequestFrame* p_request_frame = (RequestFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE];
-        ResponseFrame* p_response_frame = (ResponseFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
-        
-        char* res_header = p_response_frame->data;
-        char* res_data = &p_response_frame->data[p_response_frame->header_len];
-        int res_data_len = p_response_frame->data_len;
+                #ifdef SERVERLESS_DBG
+                printf("send http response back to client\n");
+                #endif
 
-        char* res_content = res_data - 16;
-        int null_offset = sprintf(res_content, "%d", res_data_len);
-        res_content[null_offset] = ' ';
+                RequestFrame* p_request_frame = (RequestFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE];
+                ResponseFrame* p_response_frame = (ResponseFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
+                
+                char* res_header = p_response_frame->data;
+                char* res_data = &p_response_frame->data[p_response_frame->header_len];
+                int res_data_len = p_response_frame->data_len;
 
-        ret = mtcp_write(mctx, p_request_frame->sockid, p_response_frame->data, p_response_frame->header_len + p_response_frame->data_len);
-        assert(ret == p_response_frame->header_len + p_response_frame->data_len);
+                char* res_content = res_data - 16;
+                int null_offset = sprintf(res_content, "%d", res_data_len);
+                res_content[null_offset] = ' ';
 
-        // recycle the frame
-        free_frame(p_request_frame->frame);
+                int written = 0;
+                int to_write = p_response_frame->header_len + p_response_frame->data_len;
+                while(written < to_write) {
+                    ret = mtcp_write(mctx, p_request_frame->sockid, p_response_frame->data + written, to_write - written);
+                    if(ret == -1) {
+                        printf("mtcp_write returns -1, errno is %d\n", errno);
+                        assert(0);
+                    }
+                    written += ret;
+                    if(written != to_write)
+                        printf("written %d\n", ret);
+                }
 
-        ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_DEL, p_request_frame->sockid, NULL);
-        assert(ret == 0);
-        ret = mtcp_close(mctx, p_request_frame->sockid);
-        assert(ret == 0);
+                // recycle the frame
+                free_frame(p_request_frame->frame);
+
+                ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_DEL, p_request_frame->sockid, NULL);
+                assert(ret == 0);
+                ret = mtcp_close(mctx, p_request_frame->sockid);
+                assert(ret == 0);
+
+                frameMap.erase(p_request_frame->sockid);
+            }
+        });
+        t.detach();
     }
     
 };
@@ -272,7 +327,7 @@ int main(int argc, char* argv[]) {
     assert(ret == 0);
 
     ret = mtcp_core_affinitize(core);
-    assert(ret == 0);
+    assert(ret != -1);
 
     mctx = mtcp_create_context(core);
     assert(mctx != NULL);
@@ -303,8 +358,12 @@ int main(int argc, char* argv[]) {
     ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_ADD, listenfd, &ev);
     assert(ret == 0);
 
+    // handling sk_msg
+    server.run_skmsg_egress_async();
+
     while(1) {
-        int nevents = mtcp_epoll_wait(mctx, ep_id, events, mcfg.max_num_buffers, 0);
+        int nevents = mtcp_epoll_wait(mctx, ep_id, events, mcfg.max_num_buffers, -1);
+
         #ifdef SERVERLESS_DBG
         printf("nevents %d\n", nevents);
         #endif
@@ -313,56 +372,33 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        bool do_accept = false;
+
         for(int i=0; i<nevents; i++) {
             int sockid = events[i].data.sockid;
             int eventid = events[i].events;
+
             #ifdef SERVERLESS_DBG
             printf("sockid is %d\n", sockid);
+            if(sockid != listenfd) {
+                printf("socket: client  eventid: %d  event: %s %s %s\n", eventid, 
+                    eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "", eventid & MTCP_EPOLLERR ? "ERR" : "");
+            }else{
+                printf("socket: server  eventid: %d  event: %s %s %s\n", eventid, 
+                    eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "", eventid & MTCP_EPOLLERR ? "ERR" : "");
+            }
             #endif
 
+            
             if(sockid == listenfd) {
-                #ifdef SERVERLESS_DBG
-                printf("socket: server    event: %s\n", eventid == MTCP_EPOLLIN ? "IN" : "OUT");
-                #endif
-                if(eventid == MTCP_EPOLLIN) {
-                    #ifdef SERVERLESS_DBG
-                    printf("accept new client\n");
-                    #endif
-                    int cfd = mtcp_accept(mctx, listenfd, NULL, NULL);
-                    assert(cfd != -1);
-
-                    ret = mtcp_setsock_nonblock(mctx, cfd);
-                    assert(ret == 0);
-
-                    int frame = server.allocate_frame();
-                    RequestFrame* p_request_frame = (RequestFrame*)&server.data[frame * SHARED_MEM_FRAME_SIZE];
-                    p_request_frame->sockid = cfd;
-                    p_request_frame->frame = frame;
-                    p_request_frame->recv_cur_pos = 0;
-
-                    ev.events = MTCP_EPOLLIN | MTCP_EPOLLOUT;
-                    ev.data.sockid = cfd;
-                    ev.data.ptr = p_request_frame;                   
-
-                    #ifdef SERVERLESS_DBG
-                    printf("set ev.data.ptr = %p\n", ev.data.ptr);
-                    printf("set client fd to %d\n", cfd);
-                    #endif
-
-                    ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_ADD, cfd, &ev);
-                    assert(ret == 0);
-                }
+                do_accept = true;
             }else{
-                #ifdef SERVERLESS_DBG
-                printf("socket: client  eventid: %d  event: %s %s\n", eventid, eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "");
-                #endif
                 if(eventid & MTCP_EPOLLIN) {
-                    RequestFrame* p_request_frame = (RequestFrame*)events[i].data.ptr;
+                    RequestFrame* p_request_frame = (RequestFrame*)&server.data[frameMap[sockid] * SHARED_MEM_FRAME_SIZE];
                     assert(p_request_frame != NULL);
                     sockid = p_request_frame->sockid;
 
                     #ifdef SERVERLESS_DBG
-                    printf("get events[i].data.ptr = %p\n", p_request_frame);
                     printf("data->recv_cur_pos %d\n", p_request_frame->recv_cur_pos);
                     #endif
 
@@ -386,12 +422,51 @@ int main(int argc, char* argv[]) {
                            }
                     }
 
+                }else if(eventid & MTCP_EPOLLERR) {
+                    #ifdef SERVERLESS_DBG
+                    printf("MTCP_EPOLLERR\n");
+                    #endif
+                    
+                    ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_DEL, sockid, NULL);
+                    assert(ret == 0);
+                    ret = mtcp_close(mctx, sockid);
+                    assert(ret == 0);
+
+                    frameMap.erase(sockid);
                 }
             }
         }
 
-        // handling sk_msg
-        server.run_skmsg_egress();
+        if(do_accept) {
+            while(true) {
+                int cfd = mtcp_accept(mctx, listenfd, NULL, NULL);
+                if(cfd < 0) {
+                    break;
+                }
+
+                #ifdef SERVERLESS_DBG
+                printf("accept new client\n");
+                #endif
+
+                ret = mtcp_setsock_nonblock(mctx, cfd);
+                assert(ret == 0);
+
+                int frame = server.allocate_frame();
+                RequestFrame* p_request_frame = (RequestFrame*)&server.data[frame * SHARED_MEM_FRAME_SIZE];
+                p_request_frame->sockid = cfd;
+                p_request_frame->frame = frame;
+                p_request_frame->recv_cur_pos = 0;
+
+                ev.events = MTCP_EPOLLIN | MTCP_EPOLLOUT;
+                ev.data.sockid = cfd;
+                //ev.data.ptr = NULL;
+
+                frameMap[cfd] = frame;                  
+
+                ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_ADD, cfd, &ev);
+                assert(ret == 0);
+            }
+        }
     }
 
     printf("mtcp_destroy\n");
