@@ -38,7 +38,7 @@ void usage() {
 }
 
 int main(int argc, char* argv[]) {
-    char* data;
+    HttpTransaction* transactions;
     int skmsg_socket_fd;
     int segment_id;
 
@@ -93,8 +93,8 @@ int main(int argc, char* argv[]) {
     printf("segment id is %d\n", segment_id);
     #endif
 
-    data = (char*)shmat(segment_id, NULL, 0);
-    assert(data != (char*)-1);
+    transactions = (HttpTransaction*)shmat(segment_id, NULL, 0);
+    assert(transactions != (HttpTransaction*)-1);
 
     // create skmsg socket
     skmsg_socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -121,13 +121,11 @@ int main(int argc, char* argv[]) {
         printf("delta time in nanoseconds: %ld\n", timestamp - meta.timestamp);
         #endif
 
-        RequestFrame* p_request_frame = (RequestFrame*)&data[meta.frame * SHARED_MEM_FRAME_SIZE];
-        ResponseFrame* p_response_frame = (ResponseFrame*)&data[meta.frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
-
-        char* buffer = &p_response_frame->data[p_response_frame->header_len + p_response_frame->data_len];
+        HttpTransaction* tran = &transactions[meta.frame];
+        char* buffer = &tran->response[tran->header_length + tran->content_length];
         int newLen = sprintf(buffer,
                 "Function %d processing, time: %ld, delta time: %ld\n", fun_id, timestamp, timestamp - meta.timestamp);
-        p_response_frame->data_len += newLen;
+        tran->content_length += newLen;
 
         Meta meta_send;
         meta_send.next_func_id = next_fun_id;

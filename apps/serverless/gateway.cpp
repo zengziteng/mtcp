@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/epoll.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -22,9 +23,6 @@
 #include <bits/stdc++.h>
 #include <rpc/server.h>
 
-#include <mtcp_api.h>
-#include <mtcp_epoll.h>
-
 #include <bpf/bpf.h>
 #include <bpf/xsk.h>
 #include <bpf/libbpf.h>
@@ -32,50 +30,11 @@
 
 #include "serverless.h"
 
-#ifndef SO_PREFER_BUSY_POLL
-#define SO_PREFER_BUSY_POLL	69
-#endif
-
-#ifndef SO_BUSY_POLL_BUDGET
-#define SO_BUSY_POLL_BUDGET 70
-#endif
 
 #ifndef __NR_pidfd_getfd
 #define __NR_pidfd_getfd 438
 #endif
 
-
-#define HTTP_PORT 8080
-
-struct spinlock {
-  std::atomic<bool> lock_ = {0};
-
-  void lock() noexcept {
-    for (;;) {
-      // Optimistically assume the lock is free on the first try
-      if (!lock_.exchange(true, std::memory_order_acquire)) {
-        return;
-      }
-      // Wait for lock to be released without generating cache misses
-      while (lock_.load(std::memory_order_relaxed)) {
-        // Issue X86 PAUSE or ARM YIELD instruction to reduce contention between
-        // hyper-threads
-        __builtin_ia32_pause();
-      }
-    }
-  }
-
-  bool try_lock() noexcept {
-    // First do a relaxed load to check if lock is free in order to prevent
-    // unnecessary cache misses if someone does while(!try_lock())
-    return !lock_.load(std::memory_order_relaxed) &&
-           !lock_.exchange(true, std::memory_order_acquire);
-  }
-
-  void unlock() noexcept {
-    lock_.store(false, std::memory_order_release);
-  }
-};
 
 const char* http_response_header = 
 "HTTP/1.1 200 OK\r\n"
@@ -84,44 +43,314 @@ const char* http_response_header =
 "Content-Length:             \r\n\r\n";
 
 int http_response_header_len = strlen(http_response_header);
-mctx_t mctx;
-int ep_id;
-const char* rpc_ip = NULL;
-std::map<int, int> frameMap; // key: sockid  value: frame
 
-struct Server{
-    rpc::server *rpc_srv;
+int listener_to_client_handler_pipe[2];
+int client_handler_to_skmsg_pipe[2];
+int skmsg_to_client_handler_pipe[2];
+
+const char* rpc_ip = NULL;
+
+struct GatewayListener{
+    int ep_id;
+    int listenfd;
+    epoll_event events[EPOLL_MAX_NUM_BUFFERS];
+    epoll_event ev;
+
+    void init() {
+        int ret;
+        listenfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        assert(listenfd != -1);
+
+        int flags = fcntl(listenfd, F_GETFL, 0);
+        assert(flags != -1);
+        ret = fcntl(listenfd, F_SETFL, flags | O_NONBLOCK);
+        assert(ret != -1);
+
+        int one = 1;
+        ret = setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (char*)&one, sizeof(one));
+        assert(ret == 0);
+
+        sockaddr_in srv_addr;
+
+        srv_addr.sin_family = AF_INET;
+        srv_addr.sin_port = htons(HTTP_PORT);
+        srv_addr.sin_addr.s_addr = INADDR_ANY;
+        ret = bind(listenfd, (struct sockaddr*)&srv_addr, sizeof(srv_addr));
+        assert(ret == 0);
+
+        ret = listen(listenfd, 1000);
+        assert(ret == 0);
+        
+        ep_id = epoll_create(EPOLL_MAX_NUM_BUFFERS);
+        assert(ep_id != -1);
+
+        ev.events = EPOLLIN;
+        ev.data.fd = listenfd;
+        ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, listenfd, &ev);
+        assert(ret == 0);
+    }
+
+    void run() {
+        int ret;
+        while(true) {
+            int nevents = epoll_wait(ep_id, events, EPOLL_MAX_NUM_BUFFERS, -1);
+
+            #ifdef SERVERLESS_DBG
+            printf("[listener] nevents %d\n", nevents);
+            #endif
+            
+            if(nevents < 0) {
+                break;
+            }
+
+            bool do_accept = false;
+
+            for(int i=0; i<nevents; i++) {
+                int eventid = events[i].events;
+                assert(!(eventid & EPOLLHUP));
+                assert(!(eventid & EPOLLERR));
+
+                int sockid = events[i].data.fd;
+                assert(sockid == listenfd);
+
+                #ifdef SERVERLESS_DBG
+                printf("[listener] server eventid: %d event: %s %s %s\n", eventid,
+                        eventid & EPOLLIN ? "IN" : "", eventid & EPOLLHUP ? "HUP" : "", eventid & EPOLLERR ? "ERR" : "");
+                #endif
+
+                if(sockid == listenfd && (eventid & EPOLLIN)) {
+                    do_accept = true;
+                }
+            }
+
+            if(do_accept) {
+                while(true) {
+                    int cfd = accept(listenfd, NULL, NULL);
+                    if(cfd < 0) {
+                        break;
+                    }
+
+                    #ifdef SERVERLESS_DBG
+                    printf("[listener] accept new client %d\n", cfd);
+                    #endif
+
+                    int flags = fcntl(cfd, F_GETFL, 0);
+                    assert(flags != -1);
+                    ret = fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+                    assert(ret != -1);
+
+                    ssize_t bytes_written = write(listener_to_client_handler_pipe[1], &cfd, 4);
+                    assert(bytes_written == 4);
+                }
+            }
+        }
+
+        close(listenfd);
+    }
+};
+GatewayListener gatewayListener;
+
+struct SharedMemoryManager{
+    int next_free_idx = 0;
+    int frames[HTTP_TRANSACTION_CNT];
+
+    void init() {
+        // initialize frames array
+        for(int i=0; i<HTTP_TRANSACTION_CNT; i++) {
+            frames[i] = i;
+        }
+    }
+
+    int allocate_frame() {
+        assert(next_free_idx != HTTP_TRANSACTION_CNT);
+        return frames[next_free_idx++];
+    }
+
+    void free_frame(int frame) {
+        assert(frame != -1);
+        frames[--next_free_idx] = frame;
+    }
+};
+
+
+struct GatewayClientHandler{
+    int ep_id;
+    epoll_event events[EPOLL_MAX_NUM_BUFFERS];
+    epoll_event ev;
 
     // the segment id of shared memory
     int segment_id;
-    // the data region of umem
-    char* data;
+    // the shared memory
+    HttpTransaction* transactions;
 
+    SharedMemoryManager sharedMemoryManager;
+
+    void init() {
+        int ret;
+        segment_id = shmget(rand(), sizeof(HttpTransaction) * HTTP_TRANSACTION_CNT, IPC_CREAT | 0666);
+        assert(segment_id != -1);
+
+        transactions = (HttpTransaction*)shmat(segment_id, NULL, 0);
+        assert(transactions != (HttpTransaction*)-1);
+
+        sharedMemoryManager.init();
+
+        ep_id = epoll_create(EPOLL_MAX_NUM_BUFFERS);
+        assert(ep_id != -1);
+
+        ev.events = EPOLLIN;
+        ev.data.fd = listener_to_client_handler_pipe[0];
+        ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, listener_to_client_handler_pipe[0], &ev);
+        assert(ret == 0);
+
+        ev.events = EPOLLIN;
+        ev.data.fd = skmsg_to_client_handler_pipe[0];
+        ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, skmsg_to_client_handler_pipe[0], &ev);
+        assert(ret == 0);
+    }
+
+    void add_new_client() {
+        int ret;
+        while(true) {
+            int cfd;
+            ssize_t bytes_read = read(listener_to_client_handler_pipe[0], &cfd, 4);
+            if(bytes_read == -1) {
+                if(errno == EAGAIN) {
+                    break;
+                }else{
+                    assert(0);
+                }
+            }
+            assert(bytes_read == 4);
+
+            #ifdef SERVERLESS_DBG
+            printf("[ClientHandler] add new client %d to epoll\n", cfd);
+            #endif
+
+            int frame = sharedMemoryManager.allocate_frame();
+            HttpTransaction* tran = &transactions[frame];
+            tran->sockid = cfd;
+            tran->frame = frame;
+            tran->recv_cur_pos = 0;
+            tran->send_cur_pos = 0;
+            tran->header_length = http_response_header_len;
+            tran->content_length = 0;
+            memcpy(tran->response, http_response_header, http_response_header_len);
+
+            ev.events = EPOLLIN;
+            ev.data.ptr = tran;
+
+            ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, cfd, &ev);
+            assert(ret == 0);
+        }
+    }
+
+    void write_response() {
+        int ret;
+        while(true) {
+            int frame;
+            ssize_t bytes_read = read(skmsg_to_client_handler_pipe[0], &frame, 4);
+            if(bytes_read == -1) {
+                if(errno == EAGAIN) {
+                    break;
+                }else{
+                    assert(0);
+                }
+            }
+            assert(bytes_read == 4);
+
+            HttpTransaction* tran = &transactions[frame];
+
+            #ifdef SERVERLESS_DBG
+            printf("[ClientHandler] send response to client %d\n", tran->sockid);
+            #endif
+
+            char* res_data = &tran->response[tran->header_length];
+            char* res_content_len = res_data - 16;
+            int null_offset = sprintf(res_content_len, "%d", tran->content_length);
+            res_content_len[null_offset] = ' ';
+
+            int to_write = tran->header_length + tran->content_length;
+            while(tran->send_cur_pos < to_write) {
+                ssize_t written = send(tran->sockid, &tran->response[tran->send_cur_pos], to_write - tran->send_cur_pos, 0);
+                assert(written != -1);
+                tran->send_cur_pos += written;
+            }
+
+            ret = epoll_ctl(ep_id, EPOLL_CTL_DEL, tran->sockid, NULL);
+            assert(ret == 0);
+            ret = close(tran->sockid);
+            assert(ret == 0);
+
+            // recycle the frame
+            sharedMemoryManager.free_frame(tran->frame);
+        }
+    }
+
+    void get_request(HttpTransaction* tran) {
+        assert(tran != NULL);
+
+        #ifdef SERVERLESS_DBG
+        printf("[ClientHandler] epoll_in on %d\n", tran->sockid);
+        #endif
+
+        ssize_t bytes_read = read(tran->sockid, &tran->request[tran->recv_cur_pos], HTTP_MSG_LENGTH_REQUEST_MAX - tran->recv_cur_pos);
+        assert(bytes_read != -1);
+
+        tran->recv_cur_pos += bytes_read;
+        if(tran->request[tran->recv_cur_pos-4] == '\r' &&
+            tran->request[tran->recv_cur_pos-3] == '\n' &&
+            tran->request[tran->recv_cur_pos-2] == '\r' &&
+            tran->request[tran->recv_cur_pos-1] == '\n') {
+                ssize_t bytes_written = write(client_handler_to_skmsg_pipe[1], &tran->frame, 4);
+                assert(bytes_written == 4);
+        }
+    }
+
+    void run() {
+        int ret;
+        while(true) {
+            int nevents = epoll_wait(ep_id, events, EPOLL_MAX_NUM_BUFFERS, -1);
+
+            #ifdef SERVERLESS_DBG
+            printf("[ClientHandler] nevents %d\n", nevents);
+            #endif
+
+            for(int i=0; i<nevents; i++) {
+                int eventid = events[i].events;
+                assert(!(eventid & EPOLLHUP));
+                assert(!(eventid & EPOLLERR));
+
+                if(events[i].data.fd == listener_to_client_handler_pipe[0]) {
+                    assert(eventid & EPOLLIN);
+                    add_new_client();
+                }else if(events[i].data.fd == skmsg_to_client_handler_pipe[0]) {
+                    assert(eventid & EPOLLIN);
+                    write_response();
+                }else{
+                    assert(eventid & EPOLLIN);
+                    printf("eventid = %d\n", eventid);
+                    get_request((HttpTransaction*)events[i].data.ptr);
+                }
+            }
+        }
+    }
+};
+GatewayClientHandler gatewayClientHandler;
+
+
+struct GatewaySkMsg{
     int skmsg_prog_fd;
     int skmsg_map_fd;
 
     int dummy_server_socket_fd;
     int skmsg_socket_fd;
 
-    // the index in frames array
-    int next_free_idx = 0;
-    int frames[SHARED_MEM_FRAME_CNT];
-    spinlock alloc_lock;
+    int ep_id;
+    epoll_event events[EPOLL_MAX_NUM_BUFFERS];
+    epoll_event ev;
 
-    void create() {
-        rpc_srv = new rpc::server(rpc_ip, RPC_PORT);
-
-        segment_id = shmget(rand(), SHARED_MEM_SIZE, IPC_CREAT | 0666);
-        assert(segment_id != -1);
-
-        data = (char*)shmat(segment_id, NULL, 0);
-        assert(data != (char*)-1);
-
-        // initialize frames array
-        for(int i=0; i<SHARED_MEM_FRAME_CNT; i++) {
-            frames[i] = i;
-        }
-
+    void init() {
         // load program
         struct bpf_object* obj;
         int ret = bpf_prog_load("../../afxdp/mtcp_xdp_pktio/sk_msg_kern.o", BPF_PROG_TYPE_SK_MSG, &obj, &skmsg_prog_fd);
@@ -169,115 +398,99 @@ struct Server{
         ret = connect(skmsg_socket_fd, (struct sockaddr*)&addr, sizeof(addr));
         assert(ret == 0);
 
+        int flags = fcntl(skmsg_socket_fd, F_GETFL, 0);
+        assert(flags != -1);
+        ret = fcntl(skmsg_socket_fd, F_SETFL, flags | O_NONBLOCK);
+        assert(ret != -1);
+
         int key = 0;
         ret = bpf_map_update_elem(skmsg_map_fd, &key, &skmsg_socket_fd, 0); 
         assert(ret == 0);
 
-        // add rpc
-        rpc_srv->bind(RPC_GET_SHM_SEGMENT_ID, [this](){return this->segment_id;});
-        rpc_srv->bind(RPC_UPDATE_SOCKMAP, [this](int fun_pid, int fun_sk_msg_sock_fd, int key){
-            int pidfd = syscall(SYS_pidfd_open, fun_pid, 0);
-            assert(pidfd != -1);
+        ep_id = epoll_create(EPOLL_MAX_NUM_BUFFERS);
+        assert(ep_id != -1);
 
-            int sock_fd = syscall(__NR_pidfd_getfd, pidfd, fun_sk_msg_sock_fd, 0);
-            assert(sock_fd != -1);
+        ev.events = EPOLLIN;
+        ev.data.fd = client_handler_to_skmsg_pipe[0];
+        ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, client_handler_to_skmsg_pipe[0], &ev);
+        assert(ret == 0);
 
-            int ret = bpf_map_update_elem(this->skmsg_map_fd, &key, &sock_fd, 0);
-            assert(ret == 0);
+        ev.events = EPOLLIN;
+        ev.data.fd = skmsg_socket_fd;
+        ret = epoll_ctl(ep_id, EPOLL_CTL_ADD, skmsg_socket_fd, &ev);
+        assert(ret == 0);
+    }
+
+    void begin_function_chain() {
+        int ret;
+        while(true) {
+            int frame;
+            ssize_t bytes_read = read(client_handler_to_skmsg_pipe[0], &frame, 4);
+            if(bytes_read == -1) {
+                if(errno == EAGAIN) {
+                    break;
+                }else{
+                    assert(0);
+                }
+            }
+            assert(bytes_read == 4);
+
+            Meta meta;
+            meta.next_func_id = 1;
+            meta.frame = frame;
+            meta.timestamp = get_time_nano();
+
+            int ret = send(skmsg_socket_fd, &meta, sizeof(meta), 0);
+            assert(ret == sizeof(meta));
+        }
+    }
+
+    void end_function_chain() {
+        int ret;
+        while(true) {
+            Meta meta;
+            ssize_t bytes_read = recv(skmsg_socket_fd, &meta, sizeof(meta), 0);
+            if(bytes_read == -1) {
+                if(errno == EAGAIN) {
+                    break;
+                }else{
+                    assert(0);
+                }
+            }
+            assert(bytes_read == sizeof(meta));
+
+            ssize_t bytes_written = write(skmsg_to_client_handler_pipe[1], &meta.frame, 4);
+            assert(bytes_written == 4);
+        }
+    }
+
+    void run() {
+        int ret;
+        while(true) {
+            int nevents = epoll_wait(ep_id, events, EPOLL_MAX_NUM_BUFFERS, -1);
 
             #ifdef SERVERLESS_DBG
-            printf("sockmap pos %d updated\n", key);
+            printf("[SkMsg] nevents %d\n", nevents);
             #endif
-        });
-    }
 
-    int allocate_frame() {
-        alloc_lock.lock();
-        assert(next_free_idx != SHARED_MEM_FRAME_CNT);
-        int ret = frames[next_free_idx++];
-        alloc_lock.unlock();
-        return ret;
-    }
+            for(int i=0; i<nevents; i++) {
+                int eventid = events[i].events;
+                assert(!(eventid & EPOLLHUP));
+                assert(!(eventid & EPOLLERR));
 
-    void free_frame(int frame) {
-        assert(frame != -1);
-        alloc_lock.lock();
-        frames[--next_free_idx] = frame;
-        alloc_lock.unlock();
-    }
-
-    void run_rpc_async() {
-        std::thread t([this](){
-            this->rpc_srv->run();
-        });
-        t.detach();
-    }
-
-    void skmsg_ingress(int frame) {
-        Meta meta;
-        meta.next_func_id = 1;
-        meta.frame = frame;
-        meta.timestamp = get_time_nano();
-        
-        int ret = send(skmsg_socket_fd, &meta, sizeof(meta), 0);
-        assert(ret == sizeof(meta));
-    }
-
-    void run_skmsg_egress_async() {
-        std::thread t([this](){
-            while(true) {
-                Meta meta;
-                int ret = recv(this->skmsg_socket_fd, &meta, sizeof(meta), 0);
-
-                if(ret == -1) {
-                    assert(errno == EAGAIN || errno == EWOULDBLOCK);
-                    return;
+                if(events[i].data.fd == client_handler_to_skmsg_pipe[0]) {
+                    assert(eventid & EPOLLIN);
+                    begin_function_chain();
+                }else if(events[i].data.fd == skmsg_socket_fd) {
+                    assert(eventid & EPOLLIN);
+                    end_function_chain();
                 }
-                assert(ret == sizeof(meta));
-
-                #ifdef SERVERLESS_DBG
-                printf("send http response back to client\n");
-                #endif
-
-                RequestFrame* p_request_frame = (RequestFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE];
-                ResponseFrame* p_response_frame = (ResponseFrame*)&this->data[meta.frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
-                
-                char* res_header = p_response_frame->data;
-                char* res_data = &p_response_frame->data[p_response_frame->header_len];
-                int res_data_len = p_response_frame->data_len;
-
-                char* res_content = res_data - 16;
-                int null_offset = sprintf(res_content, "%d", res_data_len);
-                res_content[null_offset] = ' ';
-
-                int written = 0;
-                int to_write = p_response_frame->header_len + p_response_frame->data_len;
-                while(written < to_write) {
-                    ret = mtcp_write(mctx, p_request_frame->sockid, p_response_frame->data + written, to_write - written);
-                    if(ret == -1) {
-                        printf("mtcp_write returns -1, errno is %d\n", errno);
-                        assert(0);
-                    }
-                    written += ret;
-                    if(written != to_write)
-                        printf("written %d\n", ret);
-                }
-
-                // recycle the frame
-                free_frame(p_request_frame->frame);
-
-                ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_DEL, p_request_frame->sockid, NULL);
-                assert(ret == 0);
-                ret = mtcp_close(mctx, p_request_frame->sockid);
-                assert(ret == 0);
-
-                frameMap.erase(p_request_frame->sockid);
             }
-        });
-        t.detach();
+        }
     }
-    
 };
+
+GatewaySkMsg gatewaySkMsg;
 
 void usage() {
     printf("Usage: ./gateway {-b (bind ip for rpc and sk_msg)}\n");
@@ -285,14 +498,9 @@ void usage() {
 }
 
 int main(int argc, char* argv[]) {
-    
-    struct mtcp_conf mcfg;
-    int core = 0;
-    int listenfd;
-    struct sockaddr_in srv_addr;
     int ret;
-    struct mtcp_epoll_event *events;
-	struct mtcp_epoll_event ev;
+    rpc::server *rpc_srv;
+    
 
     while(1) {
         int opt = getopt(argc, argv, "b:");
@@ -313,166 +521,53 @@ int main(int argc, char* argv[]) {
     if(rpc_ip == NULL) {
         usage();
     }
+
+    ret = pipe2(listener_to_client_handler_pipe, O_NONBLOCK);
+    assert(ret == 0);
+    ret = pipe2(client_handler_to_skmsg_pipe, O_NONBLOCK);
+    assert(ret == 0);
+    ret = pipe2(skmsg_to_client_handler_pipe, O_NONBLOCK);
+    assert(ret == 0);
+
+    gatewayListener.init();
+    gatewayClientHandler.init();
+    gatewaySkMsg.init();
     
+    rpc_srv = new rpc::server(rpc_ip, RPC_PORT);
+    // add rpc
+    rpc_srv->bind(RPC_GET_SHM_SEGMENT_ID, [&](){return gatewayClientHandler.segment_id;});
+    rpc_srv->bind(RPC_UPDATE_SOCKMAP, [&](int fun_pid, int fun_sk_msg_sock_fd, int key){
+        int pidfd = syscall(SYS_pidfd_open, fun_pid, 0);
+        assert(pidfd != -1);
 
-    Server server;
-    server.create();
-    server.run_rpc_async();
+        int sock_fd = syscall(__NR_pidfd_getfd, pidfd, fun_sk_msg_sock_fd, 0);
+        assert(sock_fd != -1);
 
-    mtcp_getconf(&mcfg);
-    mcfg.num_cores = 1;
-    mtcp_setconf(&mcfg);
-
-    ret = mtcp_init("gateway.conf");
-    assert(ret == 0);
-
-    ret = mtcp_core_affinitize(core);
-    assert(ret != -1);
-
-    mctx = mtcp_create_context(core);
-    assert(mctx != NULL);
-
-    listenfd = mtcp_socket(mctx, AF_INET, SOCK_STREAM, 0);
-    assert(listenfd != -1);
-
-    ret = mtcp_setsock_nonblock(mctx, listenfd);
-    assert(ret == 0);
-
-    srv_addr.sin_family = AF_INET;
-    srv_addr.sin_port = htons(HTTP_PORT);
-    srv_addr.sin_addr.s_addr = INADDR_ANY;
-    ret = mtcp_bind(mctx, listenfd, (struct sockaddr*)&srv_addr, sizeof(srv_addr));
-    assert(ret == 0);
-
-    ret = mtcp_listen(mctx, listenfd, 1000);
-    assert(ret == 0);
-
-    events = new mtcp_epoll_event[mcfg.max_num_buffers];
-    assert(events != NULL);
-    
-    ep_id = mtcp_epoll_create(mctx, mcfg.max_num_buffers);
-    assert(ep_id != -1);
-
-    ev.events = MTCP_EPOLLIN;
-    ev.data.sockid = listenfd;
-    ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_ADD, listenfd, &ev);
-    assert(ret == 0);
-
-    // handling sk_msg
-    server.run_skmsg_egress_async();
-
-    while(1) {
-        int nevents = mtcp_epoll_wait(mctx, ep_id, events, mcfg.max_num_buffers, -1);
+        int ret = bpf_map_update_elem(gatewaySkMsg.skmsg_map_fd, &key, &sock_fd, 0);
+        assert(ret == 0);
 
         #ifdef SERVERLESS_DBG
-        printf("nevents %d\n", nevents);
+        printf("sockmap pos %d updated\n", key);
         #endif
-        
-        if(nevents < 0) {
-            break;
-        }
+    });
 
-        bool do_accept = false;
+    std::thread t([&](){
+        gatewayListener.run();
+    });
+    t.detach();
 
-        for(int i=0; i<nevents; i++) {
-            int sockid = events[i].data.sockid;
-            int eventid = events[i].events;
+    std::thread t2([&](){
+        gatewayClientHandler.run();
+    });
+    t2.detach();
 
-            #ifdef SERVERLESS_DBG
-            printf("sockid is %d\n", sockid);
-            if(sockid != listenfd) {
-                printf("socket: client  eventid: %d  event: %s %s %s\n", eventid, 
-                    eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "", eventid & MTCP_EPOLLERR ? "ERR" : "");
-            }else{
-                printf("socket: server  eventid: %d  event: %s %s %s\n", eventid, 
-                    eventid & MTCP_EPOLLIN ? "IN" : "", eventid & MTCP_EPOLLOUT ? "OUT" : "", eventid & MTCP_EPOLLERR ? "ERR" : "");
-            }
-            #endif
+    std::thread t3([&](){
+        gatewaySkMsg.run();
+    });
+    t3.detach();
 
-            
-            if(sockid == listenfd) {
-                do_accept = true;
-            }else{
-                if(eventid & MTCP_EPOLLIN) {
-                    RequestFrame* p_request_frame = (RequestFrame*)&server.data[frameMap[sockid] * SHARED_MEM_FRAME_SIZE];
-                    assert(p_request_frame != NULL);
-                    sockid = p_request_frame->sockid;
-
-                    #ifdef SERVERLESS_DBG
-                    printf("data->recv_cur_pos %d\n", p_request_frame->recv_cur_pos);
-                    #endif
-
-                    int len = mtcp_read(mctx, sockid, &p_request_frame->buffer[p_request_frame->recv_cur_pos], SHARED_MEM_SUBFRAME_OFFSET - 9 - p_request_frame->recv_cur_pos);
-                    assert(len != -1);
-                    p_request_frame->recv_cur_pos += len;
-                    #ifdef SERVERLESS_DBG
-                    printf("receive request data of len %d from client\n", len);
-                    #endif
-                    
-                    if(p_request_frame->recv_cur_pos >= 4) {
-                        if(p_request_frame->buffer[p_request_frame->recv_cur_pos-4] == '\r' &&
-                           p_request_frame->buffer[p_request_frame->recv_cur_pos-3] == '\n' &&
-                           p_request_frame->buffer[p_request_frame->recv_cur_pos-2] == '\r' &&
-                           p_request_frame->buffer[p_request_frame->recv_cur_pos-1] == '\n'){
-                               ResponseFrame* p_response_frame = (ResponseFrame*)&server.data[p_request_frame->frame * SHARED_MEM_FRAME_SIZE + SHARED_MEM_SUBFRAME_OFFSET];
-                               p_response_frame->header_len = http_response_header_len;
-                               p_response_frame->data_len = 0;
-                               memcpy(p_response_frame->data, http_response_header, http_response_header_len);
-                               server.skmsg_ingress(p_request_frame->frame);
-                           }
-                    }
-
-                }else if(eventid & MTCP_EPOLLERR) {
-                    #ifdef SERVERLESS_DBG
-                    printf("MTCP_EPOLLERR\n");
-                    #endif
-                    
-                    ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_DEL, sockid, NULL);
-                    assert(ret == 0);
-                    ret = mtcp_close(mctx, sockid);
-                    assert(ret == 0);
-
-                    frameMap.erase(sockid);
-                }
-            }
-        }
-
-        if(do_accept) {
-            while(true) {
-                int cfd = mtcp_accept(mctx, listenfd, NULL, NULL);
-                if(cfd < 0) {
-                    break;
-                }
-
-                #ifdef SERVERLESS_DBG
-                printf("accept new client\n");
-                #endif
-
-                ret = mtcp_setsock_nonblock(mctx, cfd);
-                assert(ret == 0);
-
-                int frame = server.allocate_frame();
-                RequestFrame* p_request_frame = (RequestFrame*)&server.data[frame * SHARED_MEM_FRAME_SIZE];
-                p_request_frame->sockid = cfd;
-                p_request_frame->frame = frame;
-                p_request_frame->recv_cur_pos = 0;
-
-                ev.events = MTCP_EPOLLIN | MTCP_EPOLLOUT;
-                ev.data.sockid = cfd;
-                //ev.data.ptr = NULL;
-
-                frameMap[cfd] = frame;                  
-
-                ret = mtcp_epoll_ctl(mctx, ep_id, MTCP_EPOLL_CTL_ADD, cfd, &ev);
-                assert(ret == 0);
-            }
-        }
-    }
-
-    printf("mtcp_destroy\n");
-    
-    mtcp_destroy_context(mctx);
-    mtcp_destroy();
+    rpc_srv->run();
 
     return 0;
 }
+

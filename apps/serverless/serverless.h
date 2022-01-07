@@ -1,13 +1,29 @@
 #pragma once
 
-//#define SERVERLESS_DBG
+#define SERVERLESS_DBG
 
+#define HTTP_PORT 8080
 #define RPC_PORT 8081
 #define SK_MSG_PORT 8082
-#define SHARED_MEM_FRAME_SIZE 4096
-#define SHARED_MEM_SUBFRAME_OFFSET 2048
-#define SHARED_MEM_FRAME_CNT 8000
-#define SHARED_MEM_SIZE (SHARED_MEM_FRAME_SIZE * SHARED_MEM_FRAME_CNT)
+
+#define HTTP_TRANSACTION_CNT 8000
+#define HTTP_MSG_LENGTH_REQUEST_MAX 1024
+#define HTTP_MSG_LENGTH_RESPONSE_MAX 1024
+
+#define EPOLL_MAX_NUM_BUFFERS 1000
+
+struct HttpTransaction {
+    int sockid;
+    int frame;
+    int recv_cur_pos;
+    int send_cur_pos;
+    int header_length;
+    int content_length;
+
+    char request[HTTP_MSG_LENGTH_REQUEST_MAX];
+    char response[HTTP_MSG_LENGTH_RESPONSE_MAX];
+};
+
 
 // int()
 #define RPC_GET_SHM_SEGMENT_ID "get_shm_segment_id"
@@ -20,18 +36,6 @@ struct Meta{
     long timestamp;
 };
 
-struct RequestFrame {
-    int sockid;
-    int frame;
-    int recv_cur_pos;
-    char buffer[1];
-};
-
-struct ResponseFrame {
-    int header_len;
-    int data_len = 0;
-    char data[1];
-};
 
 
 
